@@ -107,7 +107,11 @@ async def launch_session():
             response.status_code,
             response.text,
         )
-        raise HTTPException(status_code=502, detail="Infra-launcher failed to launch a VM")
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {"error": response.text}
+        raise HTTPException(status_code=502, detail=payload)
 
     try:
         data = response.json()
