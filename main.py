@@ -20,7 +20,7 @@ INFRA_LAUNCHER_URL = os.getenv("INFRA_LAUNCHER_URL", "http://10.0.0.4:8000")
 SESSION_TIMEOUT_SECONDS = 3600  # 1시간
 
 # --- 세션 저장소 (메모리 기반) ---
-# 이제 세션 정보에 vmIp와 마지막 활동 시간을 저장합니다.
+# 세션 정보에 vmIp와 마지막 활동 시간 저장
 # {"session-id": {"vmIp": "10.0.2.5", "last_activity": 1678886400.0}}
 SESSIONS: Dict[str, Dict] = {}
 
