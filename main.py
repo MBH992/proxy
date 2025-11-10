@@ -4,7 +4,7 @@ import logging
 import time
 from typing import Dict
 import requests
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, status
+from fastapi import Depends, FastAPI, Header, WebSocket, WebSocketDisconnect, HTTPException, status
 from fastapi.responses import PlainTextResponse
 import os
 import websockets
@@ -17,6 +17,8 @@ logger = logging.getLogger("proxy")
 app = FastAPI()
 # infra-launcher wnth
 INFRA_LAUNCHER_URL = os.getenv("INFRA_LAUNCHER_URL", "http://10.0.0.4:8000")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 SESSION_TIMEOUT_SECONDS = 3600  # 1시간
 
 # --- 세션 저장소 (메모리 기반) ---
@@ -25,9 +27,49 @@ SESSION_TIMEOUT_SECONDS = 3600  # 1시간
 SESSIONS: Dict[str, Dict] = {}
 
 # --- 헬퍼 함수 ---
+
+
+class AuthenticationError(Exception):
+    """Raised when Supabase authentication fails."""
+
+
 async def _call_infra_launcher(method: str, endpoint: str, **kwargs) -> requests.Response:
     url = f"{INFRA_LAUNCHER_URL.rstrip('/')}{endpoint}"
     return await asyncio.to_thread(requests.request, method, url, timeout=10, **kwargs)
+
+
+async def _fetch_supabase_user(access_token: str) -> Dict:
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise AuthenticationError("Supabase environment variables are not configured")
+    if not access_token:
+        raise AuthenticationError("Missing access token")
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "apikey": SUPABASE_ANON_KEY,
+    }
+    url = f"{SUPABASE_URL.rstrip('/')}/auth/v1/user"
+    try:
+        response = await asyncio.to_thread(requests.get, url, headers=headers, timeout=10)
+    except requests.exceptions.RequestException as exc:
+        raise AuthenticationError("Failed to reach Supabase") from exc
+
+    if response.status_code != 200:
+        raise AuthenticationError("Invalid or expired Supabase token")
+
+    return response.json()
+
+
+async def get_current_user(authorization: str = Header(default=None)) -> Dict:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    token = authorization.split(" ", 1)[1].strip()
+    try:
+        return await _fetch_supabase_user(token)
+    except AuthenticationError as exc:
+        logger.warning("Supabase auth failed: %s", exc)
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
 
 
 async def delete_vm(session_id: str):
@@ -84,16 +126,18 @@ async def register_session(payload: Dict[str, str]):
     if not session_id or not vm_ip:
         raise HTTPException(status_code=400, detail="Missing sessionId or vmIp")
 
+    existing = SESSIONS.get(session_id, {})
     SESSIONS[session_id] = {
         "vmIp": vm_ip,
-        "last_activity": time.time()
+        "last_activity": time.time(),
+        "uid": existing.get("uid"),
     }
     logger.info("Session registered: %s -> %s", session_id, vm_ip)
     return {"message": "Session registered successfully"}
 
 
 @app.post("/launch", status_code=status.HTTP_201_CREATED)
-async def launch_session():
+async def launch_session(current_user: Dict = Depends(get_current_user)):
     """Launch a new user VM via infra-launcher and return session info."""
     try:
         response = await _call_infra_launcher("POST", "/api/launch-vm")
@@ -124,7 +168,8 @@ async def launch_session():
     if session_id and vm_ip:
         SESSIONS[session_id] = {
             "vmIp": vm_ip,
-            "last_activity": time.time()
+            "last_activity": time.time(),
+            "uid": current_user.get("id"),
         }
         logger.info("Session %s launched with VM %s", session_id, vm_ip)
     else:
@@ -134,8 +179,12 @@ async def launch_session():
 
 
 @app.delete("/session/{session_id}")
-async def terminate_session(session_id: str):
+async def terminate_session(session_id: str, current_user: Dict = Depends(get_current_user)):
     """Delete a user VM via infra-launcher and remove session state."""
+    session = SESSIONS.get(session_id)
+    if session and session.get("uid") and session["uid"] != current_user.get("id"):
+        raise HTTPException(status_code=403, detail="Not authorised for this session")
+
     try:
         response = await _call_infra_launcher("DELETE", f"/api/vm/{session_id}")
     except requests.exceptions.RequestException as exc:
@@ -163,15 +212,30 @@ async def terminate_session(session_id: str):
 async def session_proxy(websocket: WebSocket, session_id: str):
     await websocket.accept()
 
+    token = websocket.query_params.get("token")
+    try:
+        supabase_user = await _fetch_supabase_user(token)
+    except AuthenticationError as exc:
+        logger.warning("Websocket auth failed for session %s: %s", session_id, exc)
+        await websocket.close(code=4401)
+        return
+
     if session_id not in SESSIONS:
         logger.warning("Session not found: %s", session_id)
         await websocket.close(code=1008)
         return
 
+    session = SESSIONS[session_id]
+    owner = session.get("uid")
+    if owner and owner != supabase_user.get("id"):
+        logger.warning("Websocket access denied for session %s", session_id)
+        await websocket.close(code=4403)
+        return
+
     # 활동 시간 갱신
-    SESSIONS[session_id]["last_activity"] = time.time()
+    session["last_activity"] = time.time()
     
-    target_ip = SESSIONS[session_id]["vmIp"]
+    target_ip = session["vmIp"]
     target_uri = f"ws://{target_ip}:8889"
     
     target_ws = None
@@ -218,7 +282,7 @@ async def session_proxy(websocket: WebSocket, session_id: str):
         if target_ws:
             await target_ws.close()
         if websocket.client_state != 3: # CLOSED
-             await websocket.close()
+            await websocket.close()
         
         # VM 삭제 함수 호출
         await delete_vm(session_id)
