@@ -61,12 +61,12 @@ async def _upsert_user_session(user_id: str, session_id: str):
         return
 
     payload = {
-        "uid": user_id,
+        "user_id": user_id,
         "session_id": session_id,
         "status": "active",
     }
     headers_with_prefer = {**headers, "Prefer": "resolution=merge-duplicates"}
-    params = {"on_conflict": "uid"}
+    params = {"on_conflict": "user_id"}
 
     try:
         await asyncio.to_thread(
@@ -91,7 +91,7 @@ async def _mark_user_session_inactive(user_id: str):
         "status": "inactive",
     }
     headers_with_prefer = {**headers, "Prefer": "return=minimal"}
-    params = {"uid": f"eq.{user_id}"}
+    params = {"user_id": f"eq.{user_id}"}
 
     try:
         await asyncio.to_thread(
