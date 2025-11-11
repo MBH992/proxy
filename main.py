@@ -19,6 +19,7 @@ app = FastAPI()
 INFRA_LAUNCHER_URL = os.getenv("INFRA_LAUNCHER_URL", "http://10.0.0.4:8000")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 SESSION_TIMEOUT_SECONDS = 3600  # 1시간
 
 # --- 세션 저장소 (메모리 기반) ---
@@ -36,6 +37,73 @@ class AuthenticationError(Exception):
 async def _call_infra_launcher(method: str, endpoint: str, **kwargs) -> requests.Response:
     url = f"{INFRA_LAUNCHER_URL.rstrip('/')}{endpoint}"
     return await asyncio.to_thread(requests.request, method, url, timeout=10, **kwargs)
+
+
+def _supabase_rest_headers() -> Dict:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return {}
+
+    return {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+def _supabase_rest_url(path: str) -> str:
+    return f"{SUPABASE_URL.rstrip('/')}/rest/v1/{path}"
+
+
+async def _upsert_user_session(user_id: str, session_id: str):
+    headers = _supabase_rest_headers()
+    if not headers:
+        logger.debug("Supabase service key not configured; skipping session persistence")
+        return
+
+    payload = {
+        "uid": user_id,
+        "session_id": session_id,
+        "status": "active",
+    }
+    headers_with_prefer = {**headers, "Prefer": "resolution=merge-duplicates"}
+    params = {"on_conflict": "uid"}
+
+    try:
+        await asyncio.to_thread(
+            requests.post,
+            _supabase_rest_url("user_sessions"),
+            json=payload,
+            params=params,
+            headers=headers_with_prefer,
+            timeout=10,
+        )
+    except requests.exceptions.RequestException as exc:
+        logger.warning("Failed to upsert Supabase session for %s: %s", user_id, exc)
+
+
+async def _mark_user_session_inactive(user_id: str):
+    headers = _supabase_rest_headers()
+    if not headers:
+        return
+
+    payload = {
+        "session_id": None,
+        "status": "inactive",
+    }
+    headers_with_prefer = {**headers, "Prefer": "return=minimal"}
+    params = {"uid": f"eq.{user_id}"}
+
+    try:
+        await asyncio.to_thread(
+            requests.patch,
+            _supabase_rest_url("user_sessions"),
+            json=payload,
+            params=params,
+            headers=headers_with_prefer,
+            timeout=10,
+        )
+    except requests.exceptions.RequestException as exc:
+        logger.warning("Failed to mark Supabase session inactive for %s: %s", user_id, exc)
 
 
 async def _fetch_supabase_user(access_token: str) -> Dict:
@@ -90,7 +158,9 @@ async def delete_vm(session_id: str):
         logger.error("Error calling infra-launcher for session %s: %s", session_id, e)
     finally:
         # API 호출 성공 여부와 관계없이 세션 저장소에서 제거
-        SESSIONS.pop(session_id, None)
+        removed = SESSIONS.pop(session_id, None)
+        if removed and removed.get("uid"):
+            asyncio.create_task(_mark_user_session_inactive(removed["uid"]))
 
 # --- 백그라운드 작업 ---
 async def session_cleanup_task():
@@ -166,11 +236,13 @@ async def launch_session(current_user: Dict = Depends(get_current_user)):
     session_id = data.get("session_id")
     vm_ip = data.get("vm_ip")
     if session_id and vm_ip:
+        user_id = current_user.get("id")
         SESSIONS[session_id] = {
             "vmIp": vm_ip,
             "last_activity": time.time(),
-            "uid": current_user.get("id"),
+            "uid": user_id,
         }
+        asyncio.create_task(_upsert_user_session(user_id, session_id))
         logger.info("Session %s launched with VM %s", session_id, vm_ip)
     else:
         logger.warning("Infra-launcher response missing expected fields: %s", data)
@@ -200,7 +272,9 @@ async def terminate_session(session_id: str, current_user: Dict = Depends(get_cu
         )
         raise HTTPException(status_code=502, detail="Infra-launcher failed to delete the VM")
 
-    SESSIONS.pop(session_id, None)
+    removed = SESSIONS.pop(session_id, None)
+    if removed and removed.get("uid"):
+        asyncio.create_task(_mark_user_session_inactive(removed["uid"]))
     try:
         payload = response.json()
     except ValueError:
