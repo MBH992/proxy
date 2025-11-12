@@ -327,11 +327,21 @@ async def session_proxy(websocket: WebSocket, session_id: str):
             """클라이언트 -> 타겟 VM으로 메시지 전달"""
             try:
                 while True:
-                    msg = await websocket.receive_text()
+                    msg = await websocket.receive()
+                    msg_type = msg.get("type")
+                    if msg_type == "websocket.disconnect":
+                        break
+                    if msg_type != "websocket.receive":
+                        continue
+
                     # 활동 시간 갱신
                     if session_id in SESSIONS:
                         SESSIONS[session_id]["last_activity"] = time.time()
-                    await target_ws.send(msg)
+
+                    if msg.get("bytes") is not None:
+                        await target_ws.send(msg["bytes"])
+                    elif msg.get("text") is not None:
+                        await target_ws.send(msg["text"])
             except WebSocketDisconnect:
                 logger.info("Client websocket disconnected for session %s", session_id)
 
@@ -339,7 +349,10 @@ async def session_proxy(websocket: WebSocket, session_id: str):
             """타겟 VM -> 클라이언트로 메시지 전달"""
             try:
                 async for msg in target_ws:
-                    await websocket.send_text(msg)
+                    if isinstance(msg, (bytes, bytearray)):
+                        await websocket.send_bytes(msg)
+                    else:
+                        await websocket.send_text(msg)
             except ws_exceptions.ConnectionClosed:
                 logger.info("Target websocket closed for session %s", session_id)
 
