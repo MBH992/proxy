@@ -61,12 +61,12 @@ async def _upsert_user_session(user_id: str, session_id: str):
         return
 
     payload = {
-        "uid": user_id,
+        "user_id": user_id,
         "session_id": session_id,
         "status": "active",
     }
     headers_with_prefer = {**headers, "Prefer": "resolution=merge-duplicates"}
-    params = {"on_conflict": "uid"}
+    params = {"on_conflict": "user_id"}
 
     try:
         await asyncio.to_thread(
@@ -91,7 +91,7 @@ async def _mark_user_session_inactive(user_id: str):
         "status": "inactive",
     }
     headers_with_prefer = {**headers, "Prefer": "return=minimal"}
-    params = {"uid": f"eq.{user_id}"}
+    params = {"user_id": f"eq.{user_id}"}
 
     try:
         await asyncio.to_thread(
@@ -350,13 +350,13 @@ async def session_proxy(websocket: WebSocket, session_id: str):
         logger.error("Websocket setup failed for session %s: %s", session_id, e)
     except Exception as e:
         logger.exception("Connection error for session %s", session_id)
-    finally:
-        # 연결이 어떤 이유로든 종료되면 항상 실행
-        logger.info("Closing connection for session: %s", session_id)
-        if target_ws:
-            await target_ws.close()
-        if websocket.client_state != 3: # CLOSED
-            await websocket.close()
+    # finally:
+    #     # 연결이 어떤 이유로든 종료되면 항상 실행
+    #     logger.info("Closing connection for session: %s", session_id)
+    #     if target_ws:
+    #         await target_ws.close()
+    #     if websocket.client_state != 3: # CLOSED
+    #         await websocket.close()
         
-        # VM 삭제 함수 호출
-        await delete_vm(session_id)
+    #     # VM 삭제 함수 호출
+    #     await delete_vm(session_id)
