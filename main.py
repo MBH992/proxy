@@ -54,7 +54,7 @@ def _supabase_rest_url(path: str) -> str:
     return f"{SUPABASE_URL.rstrip('/')}/rest/v1/{path}"
 
 
-async def _upsert_user_session(user_id: str, session_id: str):
+async def _upsert_user_session(user_id: str, session_id: str, status: str = "active"):
     headers = _supabase_rest_headers()
     if not headers:
         logger.debug("Supabase service key not configured; skipping session persistence")
@@ -63,7 +63,7 @@ async def _upsert_user_session(user_id: str, session_id: str):
     payload = {
         "user_id": user_id,
         "session_id": session_id,
-        "status": "active",
+        "status": status,
     }
     headers_with_prefer = {**headers, "Prefer": "resolution=merge-duplicates"}
     params = {"on_conflict": "user_id"}
@@ -197,11 +197,14 @@ async def register_session(payload: Dict[str, str]):
         raise HTTPException(status_code=400, detail="Missing sessionId or vmIp")
 
     existing = SESSIONS.get(session_id, {})
+    user_id = existing.get("uid")
     SESSIONS[session_id] = {
         "vmIp": vm_ip,
         "last_activity": time.time(),
-        "uid": existing.get("uid"),
+        "uid": user_id,
     }
+    if user_id:
+        asyncio.create_task(_upsert_user_session(user_id, session_id, status="active"))
     logger.info("Session registered: %s -> %s", session_id, vm_ip)
     return {"message": "Session registered successfully"}
 
@@ -242,7 +245,7 @@ async def launch_session(current_user: Dict = Depends(get_current_user)):
             "last_activity": time.time(),
             "uid": user_id,
         }
-        asyncio.create_task(_upsert_user_session(user_id, session_id))
+        asyncio.create_task(_upsert_user_session(user_id, session_id, status="pending"))
         logger.info("Session %s launched with VM %s", session_id, vm_ip)
     else:
         logger.warning("Infra-launcher response missing expected fields: %s", data)
