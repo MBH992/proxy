@@ -61,7 +61,7 @@ async def _upsert_user_session(user_id: str, session_id: str, status: str = "act
         return
 
     payload = {
-        "user_id": user_id,
+        "uid": user_id,
         "session_id": session_id,
         "status": status,
     }
