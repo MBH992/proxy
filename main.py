@@ -192,12 +192,14 @@ def health():
 async def register_session(payload: Dict[str, str]):
     session_id = payload.get("sessionId")
     vm_ip = payload.get("vmIp")
+    user_id = payload.get("userId")
 
     if not session_id or not vm_ip:
         raise HTTPException(status_code=400, detail="Missing sessionId or vmIp")
 
     existing = SESSIONS.get(session_id, {})
-    user_id = existing.get("uid")
+    if not user_id:
+        user_id = existing.get("uid")
     SESSIONS[session_id] = {
         "vmIp": vm_ip,
         "last_activity": time.time(),
@@ -297,7 +299,35 @@ async def session_proxy(websocket: WebSocket, session_id: str):
         await websocket.close(code=4401)
         return
 
-    if session_id not in SESSIONS:
+    session = SESSIONS.get(session_id)
+    if not session:
+        headers = _supabase_rest_headers()
+        if headers:
+            params = {"session_id": f"eq.{session_id}"}
+            try:
+                response = await asyncio.to_thread(
+                    requests.get,
+                    _supabase_rest_url("proxy_sessions"),
+                    headers=headers,
+                    params=params,
+                    timeout=10,
+                )
+                if response.status_code == 200:
+                    rows = response.json()
+                    if rows:
+                        row = rows[0]
+                        uid = row.get("uid")
+                        vm_ip = row.get("vm_ip") or row.get("vmIp")
+                        if uid and vm_ip:
+                            session = SESSIONS[session_id] = {
+                                "vmIp": vm_ip,
+                                "last_activity": time.time(),
+                                "uid": uid,
+                            }
+            except requests.exceptions.RequestException as exc:
+                logger.warning("Supabase lookup failed for session %s: %s", session_id, exc)
+
+    if not session:
         logger.warning("Session not found: %s", session_id)
         await websocket.close(code=1008)
         return
