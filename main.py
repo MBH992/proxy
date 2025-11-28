@@ -2,7 +2,7 @@
 import asyncio
 import logging
 import time
-from typing import Dict
+from typing import Dict, Optional
 import requests
 from fastapi import Depends, FastAPI, Header, WebSocket, WebSocketDisconnect, HTTPException, status
 from fastapi.responses import PlainTextResponse
@@ -214,8 +214,14 @@ async def register_session(payload: Dict[str, str]):
 @app.post("/launch", status_code=status.HTTP_201_CREATED)
 async def launch_session(current_user: Dict = Depends(get_current_user)):
     """Launch a new user VM via infra-launcher and return session info."""
+    user_id = current_user.get("id")
+    request_payload: Optional[Dict[str, str]] = None
+    if user_id:
+        request_payload = {"userId": user_id}
+
     try:
-        response = await _call_infra_launcher("POST", "/api/launch-vm")
+        kwargs = {"json": request_payload} if request_payload else {}
+        response = await _call_infra_launcher("POST", "/api/launch-vm", **kwargs)
     except requests.exceptions.RequestException as exc:
         logger.error("Failed to reach infra-launcher for launch request: %s", exc)
         raise HTTPException(status_code=502, detail="Infra-launcher is unreachable") from exc
