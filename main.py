@@ -330,57 +330,6 @@ async def terminate_session(session_id: str, current_user: Dict = Depends(get_cu
 
     return payload
 
-@app.api_route("/session/{session_id}/k8s-api/{path:path}", methods=["GET", "POST", "OPTIONS"])
-async def k8s_api_proxy(session_id: str, path: str, request: Request):
-    """k8s-api-server로 HTTP 요청을 프록시합니다."""
-    
-    # 세션 확인
-    session = SESSIONS.get(session_id)
-    if not session:
-        # Supabase에서 세션 조회 시도 (기존 코드와 동일한 로직)
-        # ...
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-    
-    vm_ip = session["vmIp"]
-    target_url = f"http://{vm_ip}:8890/{path}"
-    
-    # 쿼리 파라미터 포함
-    if request.url.query:
-        target_url += f"?{request.url.query}"
-    
-    # 요청 본문 처리
-    body = None
-    if request.method == "POST":
-        body = await request.body()
-    
-    # VM의 k8s-api-server로 프록시
-    try:
-        response = await asyncio.to_thread(
-            requests.request,
-            method=request.method,
-            url=target_url,
-            headers=dict(request.headers),
-            data=body,
-            timeout=30
-        )
-        
-        # CORS 헤더 추가
-        headers = dict(response.headers)
-        headers["Access-Control-Allow-Origin"] = "*"
-        headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        headers["Access-Control-Allow-Headers"] = "Content-Type"
-        
-        return Response(
-            content=response.content,
-            status_code=response.status_code,
-            headers=headers,
-            media_type=response.headers.get("Content-Type", "application/json")
-        )
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to proxy k8s-api request: {e}")
-        raise HTTPException(status_code=502, detail="Failed to reach k8s-api-server")
-    
 @app.websocket("/session/{session_id}")
 async def session_proxy(websocket: WebSocket, session_id: str):
     await websocket.accept()
