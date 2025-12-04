@@ -128,6 +128,29 @@ async def _fetch_supabase_user(access_token: str) -> Dict:
     return response.json()
 
 
+async def _fetch_session_record(session_id: str) -> Optional[Dict]:
+    headers = _supabase_rest_headers()
+    if not headers or not session_id:
+        return None
+
+    params = {"session_id": f"eq.{session_id}"}
+    try:
+        response = await asyncio.to_thread(
+            requests.get,
+            _supabase_rest_url("proxy_sessions"),
+            headers=headers,
+            params=params,
+            timeout=10,
+        )
+        if response.status_code == 200:
+            rows = response.json()
+            if rows:
+                return rows[0]
+    except requests.exceptions.RequestException as exc:
+        logger.warning("Supabase lookup failed for session %s: %s", session_id, exc)
+    return None
+
+
 async def get_current_user(authorization: str = Header(default=None)) -> Dict:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing Authorization header")
@@ -198,16 +221,30 @@ async def register_session(payload: Dict[str, str]):
         raise HTTPException(status_code=400, detail="Missing sessionId or vmIp")
 
     existing = SESSIONS.get(session_id, {})
-    if not user_id:
-        user_id = existing.get("uid")
+    resolved_user_id = user_id or existing.get("uid")
+    if not resolved_user_id:
+        record = await _fetch_session_record(session_id)
+        if record:
+            resolved_user_id = record.get("uid")
     SESSIONS[session_id] = {
         "vmIp": vm_ip,
         "last_activity": time.time(),
-        "uid": user_id,
+        "uid": resolved_user_id,
     }
-    if user_id:
-        asyncio.create_task(_upsert_user_session(user_id, session_id, status="active"))
-    logger.info("Session registered: %s -> %s", session_id, vm_ip)
+    if resolved_user_id:
+        # user_id가 payload에 존재하면 초기 등록 단계로 간주하고 inactive 상태 유지
+        status = "inactive" if user_id else "active"
+        asyncio.create_task(
+            _upsert_user_session(resolved_user_id, session_id, status=status)
+        )
+    else:
+        logger.warning("No user mapping found for session %s; status unchanged", session_id)
+    logger.info(
+        "Session registered: %s -> %s (ready=%s)",
+        session_id,
+        vm_ip,
+        "false" if user_id else "true",
+    )
     return {"message": "Session registered successfully"}
 
 
@@ -253,7 +290,7 @@ async def launch_session(current_user: Dict = Depends(get_current_user)):
             "last_activity": time.time(),
             "uid": user_id,
         }
-        asyncio.create_task(_upsert_user_session(user_id, session_id, status="pending"))
+        asyncio.create_task(_upsert_user_session(user_id, session_id, status="inactive"))
         logger.info("Session %s launched with VM %s", session_id, vm_ip)
     else:
         logger.warning("Infra-launcher response missing expected fields: %s", data)
